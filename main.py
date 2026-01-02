@@ -3,35 +3,19 @@ import sys
 import hashlib
 import shutil
 import time
-from datetime import datetime
 from pathlib import Path
-
-
-class Log:
-    def __init__(self, path_to_log_file: str):
-        self.__log_path = path_to_log_file
-        self.__log_list = []
-
-    def info(self, message: str):
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"{timestamp} {message}"
-        print(line)
-        self.__log_list.append(line)
-
-    def save_to_file(self):
-        with open(self.__log_path, "w", encoding="UTF-8") as file:
-            for line in self.__log_list:
-                file.write(f"{line}\n")
+from log import Log
 
 
 def get_md5_from_first_file(source_path: str) -> str | None:
     md5_first_file = None
-    for root, dirs, files in os.walk(source_path):
-        if files:
-            file = files[0]
-            first_file_path = os.path.join(root, file)
-            md5_first_file = get_md5_from_file(first_file_path)
-            return md5_first_file
+    if source_path:
+        for root, dirs, files in os.walk(source_path):
+            if files:
+                file = files[0]
+                first_file_path = os.path.join(root, file)
+                md5_first_file = get_md5_from_file(first_file_path)
+                return md5_first_file
     return md5_first_file
 
 
@@ -103,70 +87,72 @@ def copy_or_overwrite_file(src: str, dst: str, log: Log, is_copy=True) -> None:
     try:
         shutil.copy2(src, dst)
     except Exception as ex:
-        log.info(f"{exception_message} Reason: {ex}")
+        log.warning(f"{exception_message} Reason: {ex}")
         if is_copy:
             raise
 
+def main():
+    source_path, replica_path, interval, amount_of_synchronization, log = validate_arguments(sys.argv)
+    get_md5_from_first_file(source_path)
+    synchronize_data(
+        source=source_path,
+        replica=replica_path,
+        interval_time=interval,
+        amount=amount_of_synchronization,
+        logger=log
+    )
 
-def synchronize_data(source: str, replica: str, interval_time: int, amount: int, path_log: str) -> None:
+def synchronize_data(source: str, replica: str, interval_time: int, amount: int, logger: Log) -> None:
     i = 0
-    log = Log(path_log)
-    try:
+    if source and replica:
         while i < amount:
-            log.info(f"Started {i+1} synchronisation cycle")
-            delete_redundant_data_in_replica(source=source, replica=replica, log=log, check_dir=True)
-            delete_redundant_data_in_replica(source=source, replica=replica, log=log, check_dir=False)
-            sync_source_to_replica(source=source, replica=replica, log=log)
-            log.info(f"Finished {i+1} synchronisation cycle")
-            log.info(f"Waiting for {interval_time}s to next cycle\n")
+            logger.info(f"Started {i + 1} synchronisation cycle")
+            delete_redundant_data_in_replica(source=source, replica=replica, log=logger, check_dir=True)
+            delete_redundant_data_in_replica(source=source, replica=replica, log=logger, check_dir=False)
+            sync_source_to_replica(source=source, replica=replica, log=logger)
+            logger.info(f"Finished {i + 1} synchronisation cycle")
+            logger.info(f"Waiting for {interval_time}s to next cycle")
             time.sleep(interval_time)
             i += 1
-    finally:
-        log.info(f"Finished all {i} synchronization cycles")
-        log.save_to_file()
+        logger.info(f"Finished all {i} synchronization cycles")
 
 
-def validate_arguments(
-        source_path: str,
-        replica_path: str,
-        interval: str,
-        amount_of_synchronization: str,
-        log_path: str) -> tuple:
-        if not os.path.exists(source_path):
-            raise ValueError(f"Source path '{source_path}' does not exists!")
-        if not os.path.exists(replica_path):
-            raise ValueError(f"Replica path '{replica_path}' does not exists!")
-        log_dir_name = Path(log_path).parent
-        if not log_dir_name.exists():
-            raise ValueError(f"Directory '{log_dir_name}' for log file does not exists!")
-        try:
-            int_interval = int(interval)
-            int_amount_of_synchronization = int(amount_of_synchronization)
-        except ValueError:
-            raise ValueError("Interval and amount_of_synchronization must be integers!")
-        if int_interval < 0 or int_amount_of_synchronization < 0:
-            raise ValueError("Internal and amount_of_synchronization must be higher than 0!")
-        return source_path, replica_path, int_interval, int_amount_of_synchronization, log_path
+def validate_arguments(argv) -> tuple:
+    source = None
+    replica = None
+    interval = 0
+    amount = 0
+    path_log = None
+    log = None
+    if len(argv) == 6:
+        source = argv[1]
+        replica = argv[2]
+        interval = argv[3]
+        amount = argv[4]
+        path_log = sys.argv[5]
+    if source:
+        log_dir_name = Path(path_log).parent
+        log = Log("log.txt") if log_dir_name.exists() else Log(path_log)
+        if not os.path.exists(source):
+            log.error(f"Source path '{source}' does not exists!")
+            source = None
+    if replica:
+        if not os.path.exists(replica):
+            log.error(f"Replica path '{replica}' does not exists!")
+            replica = None
+    try:
+        int_interval = int(interval)
+        int_amount_of_synchronization = int(amount)
+    except ValueError:
+        int_interval = 0
+        int_amount_of_synchronization = 0
+        log.error("Interval and amount_of_synchronization must be integers!")
+    if int_interval < 0 or int_amount_of_synchronization < 0:
+        log.error("Internal or amount_of_synchronization must be higher than 0!")
+        int_interval = 0
+        int_amount_of_synchronization = 0
+    return source, replica, int_interval, int_amount_of_synchronization, log
 
 
 if __name__ == '__main__':
-        source_path = sys.argv[1]
-        replica_path = sys.argv[2]
-        interval = sys.argv[3]
-        amount_of_synchronization = sys.argv[4]
-        log_path = sys.argv[5]
-        source_path, replica_path, interval, amount_of_synchronization, log_path = validate_arguments(
-            source_path=source_path,
-            replica_path=replica_path,
-            interval=interval,
-            amount_of_synchronization=amount_of_synchronization,
-            log_path=log_path
-        )
-        get_md5_from_first_file(source_path)
-        synchronize_data(
-            source=source_path,
-            replica=replica_path,
-            interval_time=interval,
-            amount=amount_of_synchronization,
-            path_log=log_path
-        )
+    main()
