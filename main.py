@@ -7,41 +7,43 @@ from pathlib import Path
 from log import Log
 
 
-def get_md5_from_first_file(source_path: str) -> str | None:
-    md5_first_file = None
-    if source_path:
-        for root, dirs, files in os.walk(source_path):
-            if files:
-                file = files[0]
-                first_file_path = os.path.join(root, file)
-                md5_first_file = get_md5_from_file(first_file_path)
-                return md5_first_file
-    return md5_first_file
-
-
 def get_md5_from_file(path: str) -> str:
     md5_file = hashlib.md5()
     with open(path, "rb") as file:
-        for chuck in iter(lambda: file.read(4096), b""):
-            md5_file.update(chuck)
+        for chunk in iter(lambda: file.read(4096), b""):
+            md5_file.update(chunk)
     return md5_file.hexdigest()
 
 
-def delete_redundant_data_in_replica(source: str, replica: str, log: Log, check_dir: bool) -> None:
-    for root, dirs, files in os.walk(replica, topdown=not check_dir):
-        items = dirs if check_dir else files
-        item_remove = "directory" if check_dir else "file"
-        remove_func = shutil.rmtree if check_dir else os.remove
+def delete_redundant_data_in_replica(source: str, replica: str, log: Log) -> None:
+    for root, dirs, files in os.walk(replica, topdown=False):
+        for file in files:
+            path_replica = os.path.join(root, file)
+            if not check_if_path_source_exists(root=root, item=file, source=source, replica=replica):
+                file_name = Path(path_replica).name
+                dir_name = Path(path_replica).parent
+                try:
+                    os.remove(path_replica)
+                    log.info(f"Removed redundant file '{file_name}' from '{dir_name}'")
+                except OSError as msg:
+                    log.warning(f"Cannot delete file '{file_name}' from directory '{dir_name}'. Reason: {msg}")
+    for root, dirs, files in os.walk(replica, topdown=False):
+        for dir in dirs:
+            path_replica = os.path.join(root, dir)
+            if not check_if_path_source_exists(root=root, item=dir, source=source, replica=replica):
+                dir_name = Path(path_replica).name
+                path_replica_name = Path(path_replica).parent
+                try:
+                    shutil.rmtree(path_replica)
+                    log.info(f"Removed redundant directory '{dir_name}' from '{path_replica_name}'")
+                except OSError as msg:
+                    log.warning(f"Cannot delete dir '{dir_name}' from '{path_replica_name}'. Reason: {msg}")
 
-        for item in items:
-            path_replica = os.path.join(root, item)
-            relative_path = os.path.relpath(root, replica)
-            path_source = os.path.join(source, relative_path, item)
-            if not os.path.exists(path_source):
-                item_name = Path(path_replica).name
-                parent_path_replica = Path(path_replica).parent
-                log.info(f"Removed redundant {item_remove} '{item_name}' from '{parent_path_replica}'")
-                remove_func(path_replica)
+
+def check_if_path_source_exists(root: str, item: str, source: str, replica: str) -> bool:
+    relative_path = os.path.relpath(root, replica)
+    path_source = os.path.join(source, relative_path, item)
+    return Path(path_source).exists()
 
 
 def sync_source_to_replica(source: str, replica: str, log: Log) -> None:
@@ -56,8 +58,7 @@ def sync_source_to_replica(source: str, replica: str, log: Log) -> None:
                 try:
                     os.makedirs(replica_dir_path, exist_ok=True)
                 except Exception as ex:
-                    log.info(f"Failed creating directory '{dir_name}' in '{replica}!' Reason: {ex}")
-                    raise
+                    log.error(f"Failed creating directory '{dir_name}' in '{replica}!' Reason: {ex}")
         for file in files:
             source_file_path = os.path.join(root, file)
             replica_file_path = os.path.join(parent_replica_dir, file)
@@ -80,6 +81,12 @@ def sync_source_to_replica(source: str, replica: str, log: Log) -> None:
                     )
 
 
+def is_dir_path_exists(path: str) -> bool:
+    if path:
+        check_path = Path(path)
+        return check_path.exists() and check_path.is_dir()
+    return False
+
 def copy_or_overwrite_file(src: str, dst: str, log: Log, is_copy=True) -> None:
     dst_file_name = Path(dst).name
     exception_message = f"Failed copy file '{dst_file_name}' from source!" if is_copy else \
@@ -87,13 +94,11 @@ def copy_or_overwrite_file(src: str, dst: str, log: Log, is_copy=True) -> None:
     try:
         shutil.copy2(src, dst)
     except Exception as ex:
-        log.warning(f"{exception_message} Reason: {ex}")
-        if is_copy:
-            raise
+        log.error(f"{exception_message} Reason: {ex}") if is_copy else log.warning(f"{exception_message} Reason: {ex}")
+
 
 def main():
     source_path, replica_path, interval, amount_of_synchronization, log = validate_arguments(sys.argv)
-    get_md5_from_first_file(source_path)
     synchronize_data(
         source=source_path,
         replica=replica_path,
@@ -102,13 +107,13 @@ def main():
         logger=log
     )
 
+
 def synchronize_data(source: str, replica: str, interval_time: int, amount: int, logger: Log) -> None:
     i = 0
-    if source and replica:
+    if is_dir_path_exists(source) and is_dir_path_exists(replica):
         while i < amount:
             logger.info(f"Started {i + 1} synchronisation cycle")
-            delete_redundant_data_in_replica(source=source, replica=replica, log=logger, check_dir=True)
-            delete_redundant_data_in_replica(source=source, replica=replica, log=logger, check_dir=False)
+            delete_redundant_data_in_replica(source=source, replica=replica, log=logger)
             sync_source_to_replica(source=source, replica=replica, log=logger)
             logger.info(f"Finished {i + 1} synchronisation cycle")
             logger.info(f"Waiting for {interval_time}s to next cycle")
@@ -122,24 +127,23 @@ def validate_arguments(argv) -> tuple:
     replica = None
     interval = 0
     amount = 0
-    path_log = None
-    log = None
-    if len(argv) == 6:
-        source = argv[1]
-        replica = argv[2]
-        interval = argv[3]
-        amount = argv[4]
-        path_log = sys.argv[5]
-    if source:
-        log_dir_name = Path(path_log).parent
-        log = Log("log.txt") if log_dir_name.exists() else Log(path_log)
-        if not os.path.exists(source):
-            log.error(f"Source path '{source}' does not exists!")
-            source = None
-    if replica:
-        if not os.path.exists(replica):
-            log.error(f"Replica path '{replica}' does not exists!")
-            replica = None
+    if len(argv) < 3:
+        path_log = "log.txt"
+        log = Log(path_log)
+        log.error("Not demanding requirements arguments: source and replica!")
+        return source, replica, interval, amount, log
+    source = argv[1]
+    replica = argv[2]
+    interval = argv[3] if len(argv) >= 4 else 0
+    amount = argv[4] if len(argv) >= 5 else 0
+    path_log = argv[5] if len(argv) == 6 else "log.txt"
+    log = Log(path_log)
+    if amount == 0:
+        log.warning("Amount is 0 – skipping synchronization!")
+    if not is_dir_path_exists(source):
+            log.error(f"Source path '{source}' does not exist!")
+    if not is_dir_path_exists(replica):
+        log.error(f"Replica path '{replica}' does not exist!")
     try:
         int_interval = int(interval)
         int_amount_of_synchronization = int(amount)
@@ -148,7 +152,7 @@ def validate_arguments(argv) -> tuple:
         int_amount_of_synchronization = 0
         log.error("Interval and amount_of_synchronization must be integers!")
     if int_interval < 0 or int_amount_of_synchronization < 0:
-        log.error("Internal or amount_of_synchronization must be higher than 0!")
+        log.error("Interval or amount_of_synchronization must be higher than 0!")
         int_interval = 0
         int_amount_of_synchronization = 0
     return source, replica, int_interval, int_amount_of_synchronization, log
